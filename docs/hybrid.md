@@ -136,10 +136,39 @@ Not done: weight inputs (the expert-wise copy of `MUL_MAT_ID` weights keeps its 
 
 `tests/test-sched-concurrent.cpp` builds the MoE shape (device, slow host op, independent device work, join) on the mock GPU with a device time per node: without the flag the device never runs during the host op, with it the device does, the run takes 304 ms instead of 424 ms (the predicted 100 ms instead of 140 ms per run), and the results are bit-identical to a CPU-only run. Making the dependency check ignore host results lets the join run early and the results differ.
 
+## AMX kernels for MoE experts on the CPU
+
+With experts in system memory, prefill time is mostly the CPU computing `MUL_MAT_ID`. ggml-cpu has Intel AMX kernels (4th gen Xeon and later), but only for `MUL_MAT` with 2D weights: an expert stack never used them. KTransformers (SOSP'25) gets most of its prefill gain from AMX on exactly this op.
+
+The AMX buffer type now packs a 3D weight one expert at a time, and computes `MUL_MAT_ID` from it:
+
+- the input rows are quantized once to the type the kernel reads
+- the (token, expert) pairs are sorted by expert
+- an expert that one token uses (the usual case when decoding) runs the M=1 VNNI kernel and writes to the output directly
+- an expert that several tokens use gets its rows gathered and runs the AMX tile kernel in blocks of 32 rows, then the results are scattered back
+
+Measured on this 4-core Sapphire Rapids VM, one 30B-A3B-sized layer (128 experts of 2048 -> 768, 8 used), against the faster of the plain CPU and `CPU_REPACK` kernels (`test-amx-moe --perf`):
+
+| type | 1 token | 32 tokens | 512 tokens |
+|---|---|---|---|
+| q4_0 | 2.9x | 2.4x | 4.5x |
+| q4_1 | 3.5x | 2.5x | 5.4x |
+| q8_0 | 1.6x | 2.9x | 5.5x |
+| q4_K | 2.8x | 2.0x | 1.5x |
+| iq4_xs | 2.1x | 1.9x | 1.6x |
+| q5_K | 1.5x | 1.0x | 1.1x |
+| q6_K | 0.97x | 0.73x | 0.88x |
+
+q6_K is slower and keeps the other kernels. The 1-token column repeats the same experts, so their weights are in the CPU cache; real decode reads them from memory and is bound by memory bandwidth, so it gains less than this. The 512-token column reads 113 MiB of experts and is the realistic one.
+
+Extra buffer types are only used when the model is not mmap'd, so use `--load-mode none` (and not `--no-repack`) to get these kernels for experts in system memory. On the quantized test MoE model the perplexity with and without AMX is 129.9844 and 129.9845.
+
+`tests/test-amx-moe.cpp` compares the AMX result with the plain CPU kernels for 7 types, 1/5/40 tokens and broadcast and per-expert inputs (NMSE < 1e-5, measured around 1e-13), and skips on CPUs without AMX.
+
 ## Tests
 
 ```sh
-ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache|test-lora-cache|test-sched-concurrent" --output-on-failure
+ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache|test-lora-cache|test-sched-concurrent|test-amx-moe" --output-on-failure
 ```
 
 `test-hybrid-plan` also loads every generated test model (`test-generate-models`) with `no_alloc` and checks the collected placement.
@@ -155,5 +184,6 @@ ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|
 | M4 MoE expert cache, CPU compute on miss | done, bit-exact on 52 MoE architectures on the CPU, gain not yet measured on a GPU |
 | M7 LoRA cache, CPU path until the copy is done | done, bit-exact on the CPU, not yet measured on a GPU |
 | M5 concurrent host and device splits | done, verified on a mock async GPU, not yet measured on CUDA |
+| M6 AMX kernels for MoE experts on the CPU | done, measured here: 1.5x to 5.5x on prefill for q4_0, q4_1, q8_0, q4_K, iq4_xs |
 
 To check the model on a GPU machine, compare `--fit-estimate` with `llama-bench -m model.gguf -fa 1 -p 512 -n 128` for the same placement.

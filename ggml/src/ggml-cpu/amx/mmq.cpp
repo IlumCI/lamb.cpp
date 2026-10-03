@@ -12,6 +12,7 @@
 #include "ggml-quants.h"
 #include <algorithm>
 #include <type_traits>
+#include <vector>
 
 #if defined(__gnu_linux__)
 #include <sys/syscall.h>
@@ -2279,7 +2280,8 @@ size_t ggml_backend_amx_get_alloc_size(const struct ggml_tensor * tensor) {
     };
 
     if (qtype_has_amx_kernels(TYPE)) {
-        return get_tensor_size();
+        // a 3D weight (MoE experts) is packed one expert at a time
+        return get_tensor_size() * tensor->ne[2] * tensor->ne[3];
     } else {
         // for f16, bf16 we don't do packing
         return ggml_nbytes(tensor);
@@ -2295,8 +2297,15 @@ void ggml_backend_amx_convert_weight(struct ggml_tensor * tensor, const void * d
     const int K = tensor->ne[0]; // ne0: in_features
     const int N = tensor->ne[1]; // ne1: out_features
 
+    // a 3D weight (MoE experts) is packed one expert at a time, each to its own slice
+    const int64_t n_slices = tensor->ne[2] * tensor->ne[3];
     GGML_DISPATCH_QTYPES(TYPE, [&] {
-        convert_B_packed_format<type, blck_size>((void *)((char *)tensor->data + offset), (const type *)data, N, K);
+        const size_t packed_slice = (size_t) N * get_row_size<type, blck_size>(K);
+        for (int64_t e = 0; e < n_slices; e++) {
+            convert_B_packed_format<type, blck_size>(
+                (void *)((char *)tensor->data + e * packed_slice),
+                (const type *)((const char *)data + e * tensor->nb[2]), N, K);
+        }
     });
 }
 
@@ -2503,6 +2512,226 @@ void ggml_backend_amx_mul_mat(const ggml_compute_params * params, struct ggml_te
                     wdata_batch + mb_start * row_size_A,
                     (const char *)src0->data + src0_offset + PACKED_INDEX(nb * 2, 0, KB, TILE_SIZE),
                     (float *) dst->data + dst_offset + mb_start * N + nb_start, ldc);
+            }
+        });
+    });
+}
+
+
+// layout of the work space of a MUL_MAT_ID
+struct amx_mmid_layout {
+    size_t a_q;    // src1 rows quantized to vec_dot_type
+    size_t offs;   // per expert: first index in the sorted pair list, n_as + 1 values
+    size_t pairs;  // pair indices (token * n_ids + slot), sorted by expert
+    size_t a_g;    // quantized rows gathered by expert
+    size_t c_g;    // results of the gathered rows
+    size_t size;
+};
+
+static amx_mmid_layout amx_mmid_get_layout(const struct ggml_tensor * dst, size_t row_size_A) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+    const struct ggml_tensor * ids  = dst->src[2];
+
+    const int64_t N      = src0->ne[1];
+    const int64_t n_as   = src0->ne[2];
+    const int64_t rows_b = src1->ne[1] * src1->ne[2];
+    const int64_t n_pair = ids->ne[0] * ids->ne[1];
+
+    auto pad = [](size_t x) { return (x + 63) & ~(size_t) 63; };
+
+    amx_mmid_layout l;
+    size_t off = 0;
+    l.a_q   = off; off = pad(off + rows_b * row_size_A);
+    l.offs  = off; off = pad(off + (n_as + 1) * sizeof(int32_t));
+    l.pairs = off; off = pad(off + n_pair * sizeof(int32_t));
+    l.a_g   = off; off = pad(off + n_pair * row_size_A);
+    l.c_g   = off; off = pad(off + n_pair * N * sizeof(float));
+    l.size  = off;
+    return l;
+}
+
+size_t ggml_backend_amx_desired_wsize_id(const struct ggml_tensor * dst) {
+    const enum ggml_type TYPE = dst->src[0]->type;
+    const int K = dst->src[0]->ne[0];
+    size_t size = 0;
+    GGML_DISPATCH_QTYPES(TYPE, [&] {
+        size = amx_mmid_get_layout(dst, K / blck_size * sizeof(vec_dot_type)).size;
+    });
+    return size;
+}
+
+// MUL_MAT_ID with Intel AMX, the experts of src0 are packed one after another
+//
+// src0: experts {K, N, n_as}, quantized and packed
+// src1: input   {K, ne11, n_tokens}, float32, ne11 is n_ids or 1 (broadcast)
+// ids:  experts {n_ids, n_tokens}, int32
+// dst:  output  {N, n_ids, n_tokens}, float32
+//
+// the rows that use one expert are gathered and computed with AMX tiles,
+// an expert with a single row (the usual case when decoding) uses the VNNI kernel and writes to dst directly
+void ggml_backend_amx_mul_mat_id(const ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+    const struct ggml_tensor * ids  = dst->src[2];
+
+    const enum ggml_type TYPE = src0->type;
+
+    const int     K      = src0->ne[0];
+    const int     N      = src0->ne[1];
+    const int64_t n_as   = src0->ne[2];
+    const int64_t n_ids  = ids->ne[0];
+    const int64_t n_tok  = ids->ne[1];
+    const int64_t ne11   = src1->ne[1];
+    const int64_t rows_b = ne11 * src1->ne[2];
+    const int64_t n_pair = n_ids * n_tok;
+
+    GGML_DISPATCH_QTYPES(TYPE, [&] {
+        const int KB         = K / blck_size;
+        const int TILE_SIZE  = get_tile_size<type>();
+        const size_t row_size_A   = KB * sizeof(vec_dot_type);
+        const size_t packed_slice = (size_t) N * get_row_size<type, blck_size>(K);
+
+        const amx_mmid_layout l = amx_mmid_get_layout(dst, row_size_A);
+        if (params->wsize < l.size) {
+            GGML_ABORT("insufficient work space size");
+        }
+        char *    wdata = (char *) params->wdata;
+        char *    A_q   = wdata + l.a_q;
+        int32_t * offs  = (int32_t *) (wdata + l.offs);
+        int32_t * pairs = (int32_t *) (wdata + l.pairs);
+        char *    A_g   = wdata + l.a_g;
+        float *   C_g   = (float *) (wdata + l.c_g);
+
+        auto expert_of = [&](int64_t pair) {
+            const int64_t t = pair / n_ids;
+            const int64_t j = pair % n_ids;
+            return *(const int32_t *) ((const char *) ids->data + t * ids->nb[1] + j * ids->nb[0]);
+        };
+        auto a_row = [&](int64_t pair) {
+            const int64_t t = pair / n_ids;
+            const int64_t j = pair % n_ids;
+            return A_q + (t * ne11 + j % ne11) * row_size_A;
+        };
+        auto dst_row = [&](int64_t pair) {
+            const int64_t t = pair / n_ids;
+            const int64_t j = pair % n_ids;
+            return (float *) ((char *) dst->data + t * dst->nb[2] + j * dst->nb[1]);
+        };
+
+        // quantize the input rows
+        parallel_for_ggml(params, rows_b, [&](int begin, int end) {
+            for (int r = begin; r < end; ++r) {
+                const int64_t i11 = r % ne11;
+                const int64_t i12 = r / ne11;
+                const float * x = (const float *) ((const char *) src1->data + i12 * src1->nb[2] + i11 * src1->nb[1]);
+                from_float<vec_dot_type>(x, A_q + r * row_size_A, K);
+            }
+        });
+
+        // sort the pairs by expert, a counting sort
+        if (params->ith == 0) {
+            for (int64_t e = 0; e <= n_as; e++) {
+                offs[e] = 0;
+            }
+            for (int64_t p = 0; p < n_pair; p++) {
+                const int32_t e = expert_of(p);
+                GGML_ASSERT(e >= 0 && e < n_as);
+                offs[e + 1]++;
+            }
+            for (int64_t e = 0; e < n_as; e++) {
+                offs[e + 1] += offs[e];
+            }
+            std::vector<int32_t> fill(offs, offs + n_as);
+            for (int64_t p = 0; p < n_pair; p++) {
+                pairs[fill[expert_of(p)]++] = (int32_t) p;
+            }
+        }
+        ggml_barrier(params->threadpool);
+
+        // experts with one row: VNNI kernel straight into dst
+        constexpr int kTilesN   = 4;
+        constexpr int BLOCK_N_V = TILE_N * kTilesN;
+        const int     NB_V      = div_up(N, BLOCK_N_V);
+        std::vector<int32_t> single;
+        for (int64_t e = 0; e < n_as; e++) {
+            if (offs[e + 1] - offs[e] == 1) {
+                single.push_back((int32_t) e);
+            }
+        }
+        parallel_for_ggml(params, (int) single.size() * NB_V, [&](int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                const int32_t e  = single[i / NB_V];
+                const int     nb = i % NB_V;
+                const int64_t p  = pairs[offs[e]];
+                const char * wdata_batch = a_row(p);
+                const int64_t src0_offset = e * packed_slice;
+                const int64_t dst_offset  = dst_row(p) - (float *) dst->data;
+                const int nb_start = nb * BLOCK_N_V;
+                const int nb_size  = std::min(BLOCK_N_V, N - nb_start);
+                const int ldc      = N;
+                switch (nb_size) {
+                    case 64: LAUNCH_TINYGEMM_KERNEL_VNNI(64); break;
+                    case 32: LAUNCH_TINYGEMM_KERNEL_VNNI(32); break;
+                    default: GGML_ABORT("unexpected n block size %d", nb_size);
+                }
+            }
+        });
+
+        // experts with several rows: gather their rows, compute with AMX tiles, scatter the results
+        constexpr int BLOCK_M = TILE_M * 2;
+        constexpr int BLOCK_N = TILE_N * 2;
+        const int     NB      = N / BLOCK_N;
+        std::vector<int32_t> multi;
+        std::vector<int32_t> item_start(1, 0);
+        for (int64_t e = 0; e < n_as; e++) {
+            const int32_t c = offs[e + 1] - offs[e];
+            if (c > 1) {
+                multi.push_back((int32_t) e);
+                item_start.push_back(item_start.back() + div_up(c, BLOCK_M) * NB);
+            }
+        }
+        if (multi.empty()) {
+            return;
+        }
+
+        parallel_for_ggml(params, n_pair, [&](int begin, int end) {
+            for (int q = begin; q < end; ++q) {
+                memcpy(A_g + q * row_size_A, a_row(pairs[q]), row_size_A);
+            }
+        });
+        ggml_barrier(params->threadpool);
+
+        parallel_for_ggml(params, item_start.back(), [&](int begin, int end) {
+            if (begin >= end) {
+                return;
+            }
+            ggml_tile_config_init();
+            for (int i = begin; i < end; ++i) {
+                const size_t k  = std::upper_bound(item_start.begin(), item_start.end(), i) - item_start.begin() - 1;
+                const int32_t e = multi[k];
+                const int local = i - item_start[k];
+                const int mb    = local / NB;
+                const int nb    = local % NB;
+                const int c     = offs[e + 1] - offs[e];
+                const int mb_start = mb * BLOCK_M;
+                const int mb_size  = std::min(BLOCK_M, c - mb_start);
+                const int64_t row0 = offs[e] + mb_start;
+                tinygemm_kernel_amx<vec_dot_type, type, float, blck_size>(
+                    mb_size, BLOCK_N, KB,
+                    A_g + row0 * row_size_A,
+                    (const char *) src0->data + e * packed_slice + PACKED_INDEX(nb * 2, 0, KB, TILE_SIZE),
+                    C_g + row0 * N + nb * BLOCK_N, N);
+            }
+        });
+        ggml_barrier(params->threadpool);
+
+        parallel_for_ggml(params, n_pair, [&](int begin, int end) {
+            for (int q = begin; q < end; ++q) {
+                const int32_t e = expert_of(pairs[q]);
+                if (offs[e + 1] - offs[e] > 1) {
+                    memcpy(dst_row(pairs[q]), C_g + (int64_t) q * N, N * sizeof(float));
+                }
             }
         });
     });
