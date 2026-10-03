@@ -223,6 +223,15 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     )
     set_tests_properties(test-save-load-state PROPERTIES FIXTURES_REQUIRED generate-models)
 
+    # Test the hybrid placement cost model, also on the generated dummy models
+    llama_build(test-hybrid-plan.cpp)
+    llama_test(
+        test-hybrid-plan
+        LABEL main
+        ARGS --models "${MODEL_DIR}"
+    )
+    set_tests_properties(test-hybrid-plan PROPERTIES FIXTURES_REQUIRED generate-models)
+
     llama_build(test-fusion.cpp)
 endif()
 

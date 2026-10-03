@@ -4,6 +4,7 @@
 #include "arg.h"
 #include "common.h"
 #include "fit.h"
+#include "hybrid-plan.h"
 #include "log.h"
 
 #include <cinttypes>
@@ -67,6 +68,10 @@ int llama_fit_params(int argc, char ** argv) {
             any_tbo = true;
         }
         printf("%s\n", any_tbo ? "\"" : "");
+
+        if (params.fit_estimate) {
+            hp_log_estimate(params.model.path.c_str(), mparams, cparams, params.hw_profile, params.cpuparams.n_threads);
+        }
     } else {
         LOG_INF("%s: printing estimated memory in MiB to stdout (device, model, context, compute) ...\n", __func__);
         common_log_flush(common_log_main());

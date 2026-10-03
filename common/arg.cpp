@@ -2918,6 +2918,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_FIT_TARGET"));
     add_opt(common_arg(
+        { "-fite", "--fit-estimate" }, "[on|off]",
+        string_format("print a throughput estimate of the final weight placement ('on' or 'off', default: '%s')", params.fit_estimate ? "on" : "off"),
+        [](common_params & params, const std::string & value) {
+            if (is_truthy(value)) {
+                params.fit_estimate = true;
+            } else if (is_falsey(value)) {
+                params.fit_estimate = false;
+            } else {
+                throw std::runtime_error(
+                    string_format("error: unknown value for --fit-estimate: '%s'\n", value.c_str()));
+            }
+        }
+    ).set_env("LLAMA_ARG_FIT_ESTIMATE_TPS"));
+    add_opt(common_arg(
+        { "--hw-profile" }, "PATH",
+        "hardware profile from llama-hw-profile for --fit-estimate (default: cached profile of this machine, measured once if missing)",
+        [](common_params & params, const std::string & value) {
+            params.hw_profile = value;
+        }
+    ).set_env("LLAMA_ARG_HW_PROFILE"));
+    add_opt(common_arg(
         { "-fitc", "--fit-ctx" }, "N",
         string_format("minimum ctx size that can be set by --fit option, default: %" PRIu32, params.fit_params_min_ctx),
         [](common_params & params, int value) {
