@@ -5,6 +5,7 @@
 #include "llama-cparams.h"
 #include "llama-graph.h"
 #include "llama-adapter.h"
+#include "llama-expert-cache.h"
 #include "llama-impl.h"
 #include "llama-memory.h"
 
@@ -248,6 +249,9 @@ private:
 public:
     uint32_t graph_max_nodes(uint32_t n_tokens) const;
 
+    // nullptr if the context has no expert cache
+    const llama_expert_cache * get_expert_cache() const { return ecache.get(); }
+
     // can reuse the llm_graph_result instance of the context (for example to update a memory module)
     llm_graph_result * get_gf_res_reserve() const;
 
@@ -291,6 +295,9 @@ private:
     llama_cparams cparams;
 
     llama_adapter_cvec_ptr  cvec;
+
+    // routed experts cached in device memory [n_expert_cache]
+    std::unique_ptr<llama_expert_cache> ecache;
     llama_adapter_loras_ptr loras;
 
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably

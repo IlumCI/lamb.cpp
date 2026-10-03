@@ -1,4 +1,5 @@
 #include "llama-context.h"
+#include "llama-expert-cache.h"
 
 #include "ggml.h"
 #include "llama-arch.h"
@@ -271,6 +272,7 @@ llama_context::llama_context(
     }
 
     cparams.op_offload = params.op_offload;
+    cparams.n_expert_cache = params.n_expert_cache;
     cparams.kv_unified = params.kv_unified;
 
     // initialized later
@@ -460,6 +462,18 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
         }
 
+        if (cparams.n_expert_cache > 0 && !model.hparams.no_alloc) {
+            // LLAMA_EXPERT_CACHE_HOST lets a CPU-only build exercise the cache, for tests
+            const char * host = getenv("LLAMA_EXPERT_CACHE_HOST");
+            ecache = std::make_unique<llama_expert_cache>(model, cparams.n_expert_cache, host && atoi(host) != 0);
+            if (const char * interval = getenv("LLAMA_EXPERT_CACHE_INTERVAL")) {
+                ecache->set_interval(atoi(interval));
+            }
+            if (!ecache->enabled()) {
+                ecache.reset();
+            }
+        }
+
         sched_reserve();
 
         if (!cparams.flash_attn) {
@@ -483,6 +497,12 @@ llama_context::llama_context(
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
+
+    if (ecache && ecache->stats().n_lookups > 0) {
+        const auto & st = ecache->stats();
+        LLAMA_LOG_INFO("%s: expert cache: %.1f%% of %lld expert uses were hits, %lld experts uploaded\n", __func__,
+            100.0*st.n_hits/st.n_lookups, (long long) st.n_lookups, (long long) st.n_uploads);
+    }
 
     // when training, ggml_opt allocates extra buffers through the scheduler, so the sizes no longer match the expectation
     if (!model.hparams.no_alloc && !opt_ctx) {
@@ -1463,6 +1483,18 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    // count the experts this ubatch used and move hot ones into the cache, the cache may not change while a graph runs
+    if (ecache && !res->t_moe_ids.empty()) {
+        ggml_backend_sched_synchronize(sched.get());
+        std::vector<int32_t> ids;
+        for (const auto & [il, t] : res->t_moe_ids) {
+            ids.resize(ggml_nelements(t));
+            ggml_backend_tensor_get(t, ids.data(), 0, ggml_nbytes(t));
+            ecache->observe(il, ids.data(), (int64_t) ids.size());
+        }
+        ecache->update();
     }
 
     ret = GGML_STATUS_SUCCESS;
@@ -2449,6 +2481,11 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         res *= 4;
     }
 
+    // a cached MoE layer runs the expert FFN twice, plus the table lookups
+    if (ecache) {
+        res += 64u * ecache->stats().n_layers;
+    }
+
     return res;
 }
 
@@ -2601,6 +2638,7 @@ llm_graph_params llama_context::graph_params(
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
         /*.res         =*/ res,
+        /*.ecache      =*/ ecache.get(),
     };
 }
 
@@ -3763,6 +3801,7 @@ llama_context_params llama_context_default_params() {
         /*.n_outputs_max_per_seq       =*/ 1,
         /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default
         /*.n_threads_batch             =*/ GGML_DEFAULT_N_THREADS,
+        /*.n_expert_cache              =*/ 0,
         /*.ctx_type                    =*/ LLAMA_CONTEXT_TYPE_DEFAULT,
         /*.rope_scaling_type           =*/ LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
         /*.pooling_type                =*/ LLAMA_POOLING_TYPE_UNSPECIFIED,
@@ -4493,4 +4532,17 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
 
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
+}
+
+bool llama_expert_cache_get_info(const llama_context * ctx, llama_expert_cache_info * info) {
+    if (ctx->get_expert_cache() == nullptr) {
+        return false;
+    }
+    const llama_expert_cache_stats & st = ctx->get_expert_cache()->stats();
+    info->n_lookups = st.n_lookups;
+    info->n_hits    = st.n_hits;
+    info->n_uploads = st.n_uploads;
+    info->n_bytes   = st.n_bytes;
+    info->n_layers  = st.n_layers;
+    return true;
 }

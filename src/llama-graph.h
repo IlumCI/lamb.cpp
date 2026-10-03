@@ -770,6 +770,8 @@ using llm_graph_cb = std::function<void(const llama_ubatch & ubatch, ggml_tensor
 
 class llm_graph_result;
 
+class llama_expert_cache;
+
 struct llm_graph_params {
     llm_arch arch = LLM_ARCH_UNKNOWN;
 
@@ -812,6 +814,8 @@ struct llm_graph_params {
     llm_graph_cb cb;
 
     llm_graph_result * res;
+
+    const llama_expert_cache * ecache = nullptr;
 
     // return true if the "other" params would result in a graph with the same topology as with the current params
     //   having the same topology allows us to reuse the graph in some cases
@@ -883,7 +887,8 @@ struct llm_graph_params {
             gtype == other.gtype &&
             cvec  == other.cvec  &&
             loras == other.loras &&
-            cross == other.cross;
+            cross == other.cross &&
+            ecache == other.ecache;
     }
 };
 
@@ -941,6 +946,9 @@ public:
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
 
     std::vector<ggml_tensor *> t_layer_inp;
+
+    // selected experts of each MoE layer that has an expert cache, read after compute to update the cache
+    std::vector<std::pair<int, ggml_tensor *>> t_moe_ids;
 
     std::vector<ggml_tensor *> t_sampled;
     std::vector<ggml_tensor *> t_sampled_probs;
@@ -1032,6 +1040,8 @@ struct llm_graph_context {
 
     const llama_prec_policy * prec_policy;
 
+    const llama_expert_cache * ecache;
+
     std::map<llama_seq_id, llama_sampler *> samplers;
 
     const llm_graph_cb & cb_func;
@@ -1065,7 +1075,8 @@ struct llm_graph_context {
               ggml_tensor * w,   // ggml_tensor * as
               ggml_tensor * cur, // ggml_tensor * b
               ggml_tensor * ids,
-              ggml_tensor * w_s = nullptr) const;
+              ggml_tensor * w_s = nullptr,
+              ggml_tensor * ids_s = nullptr) const; // ids for w_s, default ids
 
     ggml_tensor * build_norm(
              ggml_tensor * cur,

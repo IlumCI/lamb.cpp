@@ -232,6 +232,16 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     )
     set_tests_properties(test-hybrid-plan PROPERTIES FIXTURES_REQUIRED generate-models)
 
+    # Test the MoE expert cache: bit-identical logits with and without it, on the generated dummy models
+    llama_build(test-expert-cache.cpp)
+    llama_test(
+        test-expert-cache
+        LABEL main
+        ARGS --models "${MODEL_DIR}"
+    )
+    set_tests_properties(test-expert-cache PROPERTIES FIXTURES_REQUIRED generate-models)
+
+
     llama_build(test-fusion.cpp)
 endif()
 

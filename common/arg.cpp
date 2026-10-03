@@ -2948,6 +2948,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_OFFLOAD_POLICY"));
     add_opt(common_arg(
+        { "-ec", "--expert-cache" }, "N",
+        string_format("for MoE layers whose experts are in system memory (-cmoe, -ncmoe, -ot), keep the N most used experts per layer\n"
+            "in the memory of the GPU of that layer and compute them there (default: %d, 0 = off)", params.n_expert_cache),
+        [](common_params & params, int value) {
+            params.n_expert_cache = value;
+        }
+    ).set_env("LLAMA_ARG_EXPERT_CACHE"));
+    add_opt(common_arg(
         { "--hw-profile" }, "PATH",
         "hardware profile from llama-hw-profile for --fit-estimate (default: cached profile of this machine, measured once if missing)",
         [](common_params & params, const std::string & value) {
