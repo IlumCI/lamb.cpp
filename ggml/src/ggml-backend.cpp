@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <cmath>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -781,8 +783,96 @@ bool ggml_backend_dev_supports_buft(ggml_backend_dev_t device, ggml_backend_buff
     return device->iface.supports_buft(device, buft);
 }
 
+static std::mutex & ggml_backend_offload_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+static std::unordered_map<ggml_backend_dev_t, ggml_backend_offload_params> & ggml_backend_offload_map() {
+    static std::unordered_map<ggml_backend_dev_t, ggml_backend_offload_params> m;
+    return m;
+}
+
+void ggml_backend_dev_set_offload_params(ggml_backend_dev_t device, const struct ggml_backend_offload_params * params) {
+    GGML_ASSERT(device);
+    std::lock_guard<std::mutex> lock(ggml_backend_offload_mutex());
+    if (params == NULL) {
+        ggml_backend_offload_map().erase(device);
+    } else {
+        ggml_backend_offload_map()[device] = *params;
+    }
+}
+
+bool ggml_backend_offload_cost(const struct ggml_backend_offload_params * params, enum ggml_type type,
+        double bytes, double frac_read, double flops, double * t_host, double * t_dev) {
+    GGML_ASSERT(params && t_host && t_dev);
+    if (type < 0 || type >= GGML_TYPE_COUNT) {
+        return false;
+    }
+    const double h2d         = params->h2d_gbps*1e9;
+    const double host_gemv   = params->host_gemv_gbps[type]*1e9;
+    const double host_tflops = params->host_gemm_tflops[type]*1e12;
+    const double dev_gemv    = params->dev_gemv_gbps[type]*1e9;
+    const double dev_tflops  = params->dev_gemm_tflops[type]*1e12;
+    if (h2d <= 0.0 || host_gemv <= 0.0 || host_tflops <= 0.0 || dev_gemv <= 0.0 || dev_tflops <= 0.0) {
+        return false;
+    }
+    const double read = bytes*frac_read;
+    // an op is limited by either its weight reads or its arithmetic, whichever is slower
+    *t_host = std::max(read/host_gemv, flops/host_tflops);
+    *t_dev  = read/h2d + std::max(read/dev_gemv, flops/dev_tflops);
+    return true;
+}
+
+// -1: no decision, use the backend rule
+static int ggml_backend_offload_policy(ggml_backend_dev_t device, const struct ggml_tensor * op) {
+    if (op->op != GGML_OP_MUL_MAT && op->op != GGML_OP_MUL_MAT_ID) {
+        return -1;
+    }
+    if (getenv("GGML_OP_OFFLOAD_MIN_BATCH") != NULL) {
+        return -1;
+    }
+    ggml_backend_offload_params params;
+    {
+        std::lock_guard<std::mutex> lock(ggml_backend_offload_mutex());
+        auto it = ggml_backend_offload_map().find(device);
+        if (it == ggml_backend_offload_map().end()) {
+            return -1;
+        }
+        params = it->second;
+    }
+
+    const struct ggml_tensor * w = op->src[0];
+    // each output element is a dot product of length ne[0] of the weight
+    const double flops = 2.0*w->ne[0]*ggml_nelements(op);
+
+    double frac_read = 1.0;
+    if (op->op == GGML_OP_MUL_MAT_ID) {
+        // only the experts that at least one token uses are read, and copied by the scheduler
+        const struct ggml_tensor * ids = op->src[2];
+        const double n_expert = (double) w->ne[2];
+        const double n_used   = (double) ids->ne[0];
+        const double n_tokens = (double) ids->ne[1];
+        if (n_expert <= 0.0 || n_used <= 0.0) {
+            return -1;
+        }
+        frac_read = 1.0 - std::pow(1.0 - std::min(1.0, n_used/n_expert), n_tokens);
+    }
+
+    double t_host = 0.0;
+    double t_dev  = 0.0;
+    if (!ggml_backend_offload_cost(&params, w->type, (double) ggml_nbytes(w), frac_read, flops, &t_host, &t_dev)) {
+        return -1;
+    }
+    return t_dev < t_host ? 1 : 0;
+}
+
 bool ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_tensor * op) {
     GGML_ASSERT(device);
+    const int policy = ggml_backend_offload_policy(device, op);
+    if (policy >= 0) {
+        return policy == 1;
+    }
     if (device->iface.offload_op != NULL) {
         return device->iface.offload_op(device, op);
     }

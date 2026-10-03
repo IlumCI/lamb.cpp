@@ -511,3 +511,56 @@ bool common_hw_profile_get(const common_hw_profile_params & params, bool refresh
     }
     return true;
 }
+
+bool common_hw_profile_resolve(const std::string & profile_path, int32_t n_threads, common_hw_profile & out) {
+    if (!profile_path.empty()) {
+        if (!common_hw_profile_load(profile_path, out)) {
+            LOG_ERR("%s: failed to load hardware profile %s\n", __func__, profile_path.c_str());
+            return false;
+        }
+        return true;
+    }
+    common_hw_profile_params hp;
+    hp.n_threads = n_threads;
+    return common_hw_profile_get(hp, false, out);
+}
+
+bool common_hw_profile_offload_params(const common_hw_profile & prof, const std::string & dev_name, ggml_backend_offload_params & out) {
+    const common_hw_dev_profile * cpu = prof.cpu();
+    const common_hw_dev_profile * dev = prof.find(dev_name);
+    if (cpu == nullptr || dev == nullptr || dev->is_host() || dev->h2d_gbps <= 0.0) {
+        return false;
+    }
+    out = {};
+    out.h2d_gbps = (float) dev->h2d_gbps;
+    for (int t = 0; t < GGML_TYPE_COUNT; t++) {
+        const ggml_type type = (ggml_type) t;
+        if (ggml_type_size(type) == 0 || ggml_blck_size(type) == 0) {
+            continue; // removed types
+        }
+        out.host_gemv_gbps  [t] = (float) cpu->gemv_gbps_for(type);
+        out.host_gemm_tflops[t] = (float) cpu->gemm_tflops_for(type);
+        out.dev_gemv_gbps   [t] = (float) dev->gemv_gbps_for(type);
+        out.dev_gemm_tflops [t] = (float) dev->gemm_tflops_for(type);
+    }
+    return true;
+}
+
+int common_hw_profile_apply_offload(const common_hw_profile & prof) {
+    int n = 0;
+    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        const auto type = ggml_backend_dev_type(dev);
+        if (type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
+            continue;
+        }
+        ggml_backend_offload_params params;
+        if (!common_hw_profile_offload_params(prof, ggml_backend_dev_name(dev), params)) {
+            LOG_WRN("%s: hardware profile has no entry for %s, it keeps the fixed offload rule\n", __func__, ggml_backend_dev_name(dev));
+            continue;
+        }
+        ggml_backend_dev_set_offload_params(dev, &params);
+        n++;
+    }
+    return n;
+}

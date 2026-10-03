@@ -195,6 +195,28 @@ extern "C" {
     GGML_API bool                          ggml_backend_dev_supports_buft(ggml_backend_dev_t device, ggml_backend_buffer_type_t buft);
     GGML_API bool                          ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
 
+    // Cost based op offload
+    // When a device has offload params, ggml_backend_dev_offload_op decides for matmuls with host weights by comparing
+    // the time to run the op on the host with the time to copy the used weights to the device and run it there.
+    // Other ops, and devices without params, keep the rule of the backend (GGML_OP_OFFLOAD_MIN_BATCH).
+    // If GGML_OP_OFFLOAD_MIN_BATCH is set in the environment, the backend rule is always used.
+    struct ggml_backend_offload_params {
+        float h2d_gbps;                           // host -> device copy speed
+        float host_gemv_gbps  [GGML_TYPE_COUNT];  // host weight read speed of a single-token matmul, per weight type
+        float host_gemm_tflops[GGML_TYPE_COUNT];  // host batched matmul throughput, per weight type
+        float dev_gemv_gbps   [GGML_TYPE_COUNT];  // device weight read speed of a single-token matmul, per weight type
+        float dev_gemm_tflops [GGML_TYPE_COUNT];  // device batched matmul throughput, per weight type
+    };
+
+    // set or clear (params == NULL) the offload params of a device
+    GGML_API void ggml_backend_dev_set_offload_params(ggml_backend_dev_t device, const struct ggml_backend_offload_params * params);
+
+    // times in seconds for a matmul with a weight of the given type and size on the host and on the device
+    //   frac_read: fraction of the weight that the op reads (the used experts for MUL_MAT_ID)
+    //   returns false if the params lack a number that is needed
+    GGML_API bool ggml_backend_offload_cost(const struct ggml_backend_offload_params * params, enum ggml_type type,
+            double bytes, double frac_read, double flops, double * t_host, double * t_dev);
+
     //
     // Backend (reg)
     //

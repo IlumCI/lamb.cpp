@@ -205,6 +205,21 @@ static void test_moe() {
     printf("moe prefill at ub 512: offload %.0f t/s, cpu only %.0f t/s, ub 16 %.0f t/s\n",
         e_pp_offload.pp_tps, e_pp_cpu.pp_tps, e_pp_small.pp_tps);
 
+    // the cost policy picks the faster side per tensor, so it is never slower than the fixed rule
+    for (int32_t ub : {16, 32, 64, 128, 512, 2048}) {
+        hp_cost_params fixed = cp;
+        fixed.n_ubatch = ub;
+        hp_cost_params cost = fixed;
+        cost.offload_cost = true;
+        const hp_estimate e_fixed = hp_estimate_cost(dense_first, prof, fixed);
+        const hp_estimate e_cost  = hp_estimate_cost(dense_first, prof, cost);
+        CHECK(e_cost.pp_tps >= e_fixed.pp_tps*(1.0 - 1e-9));
+        if (ub == 64) {
+            printf("moe prefill at ub 64: fixed rule %.0f t/s, cost policy %.0f t/s\n", e_fixed.pp_tps, e_cost.pp_tps);
+            CHECK(e_cost.pp_tps > 1.5*e_fixed.pp_tps);
+        }
+    }
+
     // decode does not depend on the ubatch
     CHECK(std::fabs(e_pp_small.tg_s - e_pp_offload.tg_s) < 1e-12);
 
