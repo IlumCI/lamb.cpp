@@ -78,6 +78,8 @@ add_library(${TARGET}
     download.h
     fit.cpp
     fit.h
+    hw-profile.cpp
+    hw-profile.h
     hf-cache.cpp
     hf-cache.h
     http.h
