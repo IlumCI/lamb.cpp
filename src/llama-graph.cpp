@@ -2373,10 +2373,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         ggml_tensor * hit      = ggml_reshape_3d(ctx0, ggml_get_rows(ctx0, ec->tab_hit,  ids), 1, n_expert_used, n_tokens);
         ggml_tensor * miss     = ggml_reshape_3d(ctx0, ggml_get_rows(ctx0, ec->tab_miss, ids), 1, n_expert_used, n_tokens);
 
-        ggml_tensor * out_dev  = build_experts(cur, ec->dst[0], ec->dst[1], ec->dst[3], ec->dst[2], ids_dev);
-        cb(out_dev, "ffn_moe_cache_dev", il);
+        // the host part comes first in the graph, so that the device part forms the next split and can run while the host works
         ggml_tensor * out_host = build_experts(cur, up_exps, gate_exps, gate_up_exps, down_exps, ids_host);
         cb(out_host, "ffn_moe_cache_host", il);
+        ggml_build_forward_expand(gf, out_host);
+        ggml_tensor * out_dev  = build_experts(cur, ec->dst[0], ec->dst[1], ec->dst[3], ec->dst[2], ids_dev);
+        cb(out_dev, "ffn_moe_cache_dev", il);
 
         // x*1 + y*0 is exact, so the result equals the uncached one when both paths compute the same values
         experts = ggml_add(ctx0, ggml_mul(ctx0, out_dev, hit), ggml_mul(ctx0, out_host, miss));

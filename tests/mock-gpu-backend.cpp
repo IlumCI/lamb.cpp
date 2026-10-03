@@ -22,6 +22,7 @@
 struct mock_dev_ctx {
     int64_t copy_delay_us;
     int64_t offload_min_batch;
+    std::atomic<int64_t> compute_delay_us {0};
 
     ggml_backend_buffer_type buft;
     ggml_backend_reg         reg;
@@ -249,6 +250,15 @@ static enum ggml_status mock_backend_graph_compute(ggml_backend_t backend, ggml_
     ggml_backend_t cpu = s->cpu;
     s->push([d, g, cpu]() mutable {
         d->running_graphs++;
+        if (d->compute_delay_us > 0) {
+            // device time grows with the work, not with the number of launches
+            int n = 0;
+            for (int i = 0; i < g.n_nodes; i++) {
+                n += g.nodes[i]->op != GGML_OP_NONE && g.nodes[i]->op != GGML_OP_VIEW && g.nodes[i]->op != GGML_OP_RESHAPE &&
+                     g.nodes[i]->op != GGML_OP_PERMUTE && g.nodes[i]->op != GGML_OP_TRANSPOSE;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(d->compute_delay_us.load()*n));
+        }
         ggml_backend_graph_compute(cpu, &g);
         d->running_graphs--;
     });
@@ -364,8 +374,9 @@ static ggml_backend_buffer_type_t mock_dev_get_buffer_type(ggml_backend_dev_t de
 }
 
 static bool mock_dev_supports_op(ggml_backend_dev_t, const ggml_tensor * op) {
-    // SCALE stays on the CPU, so tests can put a CPU split between two device splits
-    if (op->op == GGML_OP_SCALE) {
+    // SCALE and custom ops stay on the CPU, so tests can put a CPU split between two device splits
+    if (op->op == GGML_OP_SCALE || op->op == GGML_OP_CUSTOM || op->op == GGML_OP_MAP_CUSTOM1 ||
+        op->op == GGML_OP_MAP_CUSTOM2 || op->op == GGML_OP_MAP_CUSTOM3) {
         return false;
     }
     ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
@@ -480,4 +491,12 @@ void mock_gpu_reset_stats(ggml_backend_dev_t dev) {
     d->n_graphs     = 0;
     d->n_instances  = 0;
     d->n_overlap_us = 0;
+}
+
+void mock_gpu_set_compute_delay(ggml_backend_dev_t dev, int64_t us) {
+    dev_ctx(dev)->compute_delay_us = us;
+}
+
+int mock_gpu_running_graphs(ggml_backend_dev_t dev) {
+    return dev_ctx(dev)->running_graphs.load();
 }
