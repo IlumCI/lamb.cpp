@@ -57,10 +57,32 @@ llama-server -m moe.gguf -ncmoe 99 --offload-policy cost
 
 `--fit-estimate` follows the policy that is set, so it predicts both.
 
+## Weight prefetch (`GGML_SCHED_PREFETCH=1`)
+
+When an op with weights in system memory runs on the GPU, the scheduler gives it its own split and copies the weights in before the split runs. Upstream does that copy on the same stream as the compute, so the GPU waits for PCIe before every such split and PCIe waits for the GPU between them.
+
+With `GGML_SCHED_PREFETCH=1`:
+
+- the weight copies of each split go into one of two staging slots of the GPU instead of the compute buffer; the slots alternate between consecutive weight splits of a device
+- a second backend instance of the same device (a second CUDA stream) uploads the weights of the next weight split while the current one computes
+- two events per slot keep the order: a split waits until its slot is `ready`, and an upload into a slot waits until the split that read it before has `freed` it
+
+Left on the normal path, so nothing changes for them: weights that another split also reads (a slot is reused two splits later), `MUL_MAT_ID` weights at the start of a split (they are copied one used expert at a time after the router ran, which needs the expert ids), pipeline parallelism (`n_copies > 1`), and backends without events, async uploads or a second instance.
+
+The staging slots cost `2 x` the largest set of weights one split copies, and are reported in the compute buffer size of the device (`ggml_backend_sched_get_buffer_size`). The upload from host memory overlaps best when the host weights are in pinned memory (`--load-mode none` uses the pinned host buffer type of the GPU); from mmap'd pages CUDA stages the copy and the host thread waits for it, but the previous split still runs on the GPU meanwhile.
+
+It matters for prefill with weights in system memory, which M2 makes more frequent for dense weights. For decode no weights are copied, so it does nothing there.
+
+```sh
+GGML_SCHED_PREFETCH=1 llama-bench -m model.gguf -ngl 10 -p 512,2048 -n 0
+```
+
+`tests/test-sched-prefetch.cpp` runs a graph with dense, quantized, shared and MoE weights in host memory on a mock asynchronous GPU (`tests/mock-gpu-backend.cpp`: one worker thread per stream, real events, slow uploads, buffers filled with NaN until written) and requires bit-identical results to a CPU-only run, an upload count that shows the staging was used, and copy time that overlapped compute. Removing either of the two waits makes it fail.
+
 ## Tests
 
 ```sh
-ctest --test-dir build -R "test-hw-profile|test-hybrid-plan" --output-on-failure
+ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch" --output-on-failure
 ```
 
 `test-hybrid-plan` also loads every generated test model (`test-generate-models`) with `no_alloc` and checks the collected placement.
@@ -72,7 +94,7 @@ ctest --test-dir build -R "test-hw-profile|test-hybrid-plan" --output-on-failure
 | M0 hardware profile | done, CPU verified, GPU copy and matmul numbers not yet measured on a GPU |
 | M1 cost model and `--fit-estimate` | done, accuracy against real runs not yet measured on a GPU |
 | M2 cost based op offload | done, CPU verified, gain not yet measured on a GPU |
-| M3 async double-buffered weight streaming | planned |
+| M3 weight prefetch on a second stream | done, verified on a mock async GPU, not yet measured on CUDA |
 | M4 GPU expert cache, CPU compute on miss | planned |
 | M7 tiered LoRA cache | planned |
 | M5 concurrent CPU/GPU splits | planned |
