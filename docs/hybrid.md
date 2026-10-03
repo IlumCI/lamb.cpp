@@ -79,10 +79,35 @@ GGML_SCHED_PREFETCH=1 llama-bench -m model.gguf -ngl 10 -p 512,2048 -n 0
 
 `tests/test-sched-prefetch.cpp` runs a graph with dense, quantized, shared and MoE weights in host memory on a mock asynchronous GPU (`tests/mock-gpu-backend.cpp`: one worker thread per stream, real events, slow uploads, buffers filled with NaN until written) and requires bit-identical results to a CPU-only run, an upload count that shows the staging was used, and copy time that overlapped compute. Removing either of the two waits makes it fail.
 
+## MoE expert cache (`--expert-cache N`)
+
+With routed experts in system memory (`-cmoe`, `-ncmoe`, `-ot exps=CPU`), every decoded token computes `n_expert_used` experts per layer on the CPU. Expert use is skewed, so a few experts per layer serve a large part of the tokens. `--expert-cache N` keeps the N most used experts of each such layer in the memory of the GPU that runs the layer, and computes them there (Fiddler 2402.07033, HybriMoE 2504.05897, 2512.16473, CoX-MoE 2605.17889).
+
+How it runs, without new ggml ops or kernel changes:
+
+- per cached layer there are three small lookup tables, read with `GET_ROWS` on the selected experts: the cache slot of each expert, the expert the host computes, and a hit/miss mask
+- `build_moe_ffn` runs the expert FFN twice: once on the cache stacks `[n_embd, n_ff, N]` in VRAM with the slot ids, and once on the host stacks with the host ids
+- on a hit the host computes one shared stand-in expert (the most used uncached one, which a miss is likely to read anyway), so the host reads the missed experts and at most one more; on a miss the GPU computes slot 0 and the result is dropped
+- the two results are combined as `dev * hit + host * miss`; `x * 1 + y * 0` is exact, so the output equals the uncached one bit for bit when both paths compute the same values
+- after each ubatch the selected experts are read back and counted; every `LLAMA_EXPERT_CACHE_INTERVAL` ubatches (default 8) the most used experts replace the least used cached ones (at most 64 uploads per update, a swap needs a 25% higher count, counts halve each update so the cache follows the text)
+
+Cost: `N x` the size of one expert of every cached layer in VRAM, logged at context creation (for a 48-layer 30B-A3B in q4_K about 128 MiB per slot, so 32 slots are about 4 GiB). This memory is not yet counted by `--fit`, so leave room for it with `--fit-target`. Each ubatch also synchronizes once to read the expert ids.
+
+What is not cached: layers whose stacks are repacked for the CPU (use `--no-repack`), layers on a CPU-only device, models with an expert LoRA loaded, and architectures that do not route experts through `build_moe_ffn`.
+
+The hit rate is logged when the context is freed. It decides the gain: the host reads `misses + 1` experts per layer instead of `n_expert_used`.
+
+```sh
+llama-bench -m moe.gguf -ncmoe 99 -n 128 -p 0 -ec 0,16,32
+llama-server -m moe.gguf -ncmoe 99 --expert-cache 32
+```
+
+`tests/test-expert-cache.cpp` runs every generated MoE test model with and without a cache placed in host memory (`LLAMA_EXPERT_CACHE_HOST=1`) and updated after every ubatch, and requires bit-identical logits over a prompt and 32 decoded tokens: 55 models, 52 of them route through the cache. Uploading the wrong expert into a slot makes all 52 fail.
+
 ## Tests
 
 ```sh
-ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch" --output-on-failure
+ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache" --output-on-failure
 ```
 
 `test-hybrid-plan` also loads every generated test model (`test-generate-models`) with `no_alloc` and checks the collected placement.
@@ -95,7 +120,7 @@ ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|
 | M1 cost model and `--fit-estimate` | done, accuracy against real runs not yet measured on a GPU |
 | M2 cost based op offload | done, CPU verified, gain not yet measured on a GPU |
 | M3 weight prefetch on a second stream | done, verified on a mock async GPU, not yet measured on CUDA |
-| M4 GPU expert cache, CPU compute on miss | planned |
+| M4 MoE expert cache, CPU compute on miss | done, bit-exact on 52 MoE architectures on the CPU, gain not yet measured on a GPU |
 | M7 tiered LoRA cache | planned |
 | M5 concurrent CPU/GPU splits | planned |
 

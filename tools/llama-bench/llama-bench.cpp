@@ -365,6 +365,7 @@ struct cmd_params {
     std::vector<bool>                embeddings;
     std::vector<bool>                no_op_offload;
     std::vector<std::string>         offload_policy;
+    std::vector<int>                 n_expert_cache;
     std::vector<bool>                no_host;
     std::vector<bool>                repack;
     std::vector<size_t>              fit_params_target;
@@ -413,6 +414,7 @@ static const cmd_params cmd_params_defaults = {
     /* embeddings           */ { false },
     /* no_op_offload        */ { false },
     /* offload_policy       */ { "fixed" },
+    /* n_expert_cache       */ { 0 },
     /* no_host              */ { false },
     /* repack               */ { llama_model_default_params().use_extra_bufts },
     /* fit_params_target    */ { 0 },
@@ -491,6 +493,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -nopo, --no-op-offload <0|1>                      (default: 0)\n");
     printf("  -opol, --offload-policy <fixed|cost>              (default: %s)\n", join(cmd_params_defaults.offload_policy, ",").c_str());
     printf("  --hw-profile <path>                               hardware profile for -opol cost (default: cached profile)\n");
+    printf("  -ec, --expert-cache <n>                           MoE experts per layer cached on the GPU (default: %s)\n", join(cmd_params_defaults.n_expert_cache, ",").c_str());
     printf("  --no-host <0|1>                                   (default: %s)\n", join(cmd_params_defaults.no_host, ",").c_str());
     printf("  --repack <0|1>                                    (default: %s)\n", join(cmd_params_defaults.repack, ",").c_str());
     printf("\n");
@@ -922,6 +925,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                     }
                 }
                 params.offload_policy.insert(params.offload_policy.end(), p.begin(), p.end());
+            } else if (arg == "-ec" || arg == "--expert-cache") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = parse_int_range(argv[i]);
+                params.n_expert_cache.insert(params.n_expert_cache.end(), p.begin(), p.end());
             } else if (arg == "--hw-profile") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1209,6 +1219,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     if (params.offload_policy.empty()) {
         params.offload_policy = cmd_params_defaults.offload_policy;
     }
+    if (params.n_expert_cache.empty()) {
+        params.n_expert_cache = cmd_params_defaults.n_expert_cache;
+    }
     if (params.no_host.empty()) {
         params.no_host = cmd_params_defaults.no_host;
     }
@@ -1264,6 +1277,7 @@ struct cmd_params_instance {
     bool               embeddings;
     bool               no_op_offload;
     std::string        offload_policy;
+    int                n_expert_cache;
     bool               no_host;
     bool               repack;
     size_t             fit_target;
@@ -1344,6 +1358,7 @@ struct cmd_params_instance {
         cparams.flash_attn_type = flash_attn;
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
+        cparams.n_expert_cache  = n_expert_cache;
         cparams.swa_full        = false;
 
         return cparams;
@@ -1372,6 +1387,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & embd : params.embeddings)
     for (const auto & nopo : params.no_op_offload)
     for (const auto & opol : params.offload_policy)
+    for (const auto & necache : params.n_expert_cache)
     for (const auto & nb : params.n_batch)
     for (const auto & nub : params.n_ubatch)
     for (const auto & tk : params.type_k)
@@ -1414,6 +1430,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings            = */ embd,
                 /* .no_op_offload         = */ nopo,
                 /* .offload_policy        = */ opol,
+                /* .n_expert_cache        = */ necache,
                 /* .no_host               = */ noh,
                 /* .repack                = */ rpk,
                 /* .fit_target            = */ fpt,
@@ -1453,6 +1470,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings            = */ embd,
                 /* .no_op_offload         = */ nopo,
                 /* .offload_policy        = */ opol,
+                /* .n_expert_cache        = */ necache,
                 /* .no_host               = */ noh,
                 /* .repack                = */ rpk,
                 /* .fit_target            = */ fpt,
@@ -1492,6 +1510,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings            = */ embd,
                 /* .no_op_offload         = */ nopo,
                 /* .offload_policy        = */ opol,
+                /* .n_expert_cache        = */ necache,
                 /* .no_host               = */ noh,
                 /* .repack                = */ rpk,
                 /* .fit_target            = */ fpt,
@@ -1536,6 +1555,7 @@ struct test {
     bool                     embeddings;
     bool                     no_op_offload;
     std::string              offload_policy;
+    int                      n_expert_cache;
     bool                     no_host;
     bool                     repack;
     size_t                   fit_target;
@@ -1578,6 +1598,7 @@ struct test {
         embeddings     = inst.embeddings;
         no_op_offload  = inst.no_op_offload;
         offload_policy = inst.offload_policy;
+        n_expert_cache = inst.n_expert_cache;
         no_host        = inst.no_host;
         repack         = inst.repack;
         fit_target     = inst.fit_target;
@@ -1640,7 +1661,7 @@ struct test {
             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
             "tensor_buft_overrides",            "load_mode",     "lazy_mode",
             "embeddings",
-            "no_op_offload",  "offload_policy", "no_host",        "repack",        "fit_target",    "fit_min_ctx",
+            "no_op_offload",  "offload_policy", "n_expert_cache", "no_host",        "repack",        "fit_target",    "fit_min_ctx",
             "n_prompt",       "n_gen",          "n_depth",
             "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
         };
@@ -1653,7 +1674,7 @@ struct test {
         if (field == "build_number" || field == "n_batch" || field == "n_ubatch" || field == "n_threads" ||
             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
-            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
+            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" || field == "n_expert_cache" ||
             field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn") {
             return INT;
         }
@@ -1738,6 +1759,7 @@ struct test {
                                             std::to_string(embeddings),
                                             std::to_string(no_op_offload),
                                             offload_policy,
+                                            std::to_string(n_expert_cache),
                                             std::to_string(no_host),
                                             std::to_string(repack),
                                             std::to_string(fit_target),
@@ -1933,6 +1955,9 @@ struct markdown_printer : public printer {
         if (field == "offload_policy") {
             return -5;
         }
+        if (field == "n_expert_cache") {
+            return 4;
+        }
         if (field == "no_host") {
             return 4;
         }
@@ -1975,6 +2000,9 @@ struct markdown_printer : public printer {
         }
         if (field == "offload_policy") {
             return "opol";
+        }
+        if (field == "n_expert_cache") {
+            return "ec";
         }
         if (field == "no_host") {
             return "noh";
@@ -2074,6 +2102,9 @@ struct markdown_printer : public printer {
         }
         if (params.offload_policy.size() > 1 || params.offload_policy != cmd_params_defaults.offload_policy) {
             fields.emplace_back("offload_policy");
+        }
+        if (params.n_expert_cache.size() > 1 || params.n_expert_cache != cmd_params_defaults.n_expert_cache) {
+            fields.emplace_back("n_expert_cache");
         }
         if (params.no_host.size() > 1 || params.no_host != cmd_params_defaults.no_host) {
             fields.emplace_back("no_host");

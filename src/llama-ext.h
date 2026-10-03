@@ -154,3 +154,18 @@ LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_mode
 // if out is nullptr, returns the number of tokens without writing to out
 // caller must allocate enough memory for out before calling
 LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out);
+
+//
+// expert cache [n_expert_cache]
+//
+
+struct llama_expert_cache_info {
+    int64_t n_lookups; // routed expert uses seen
+    int64_t n_hits;    // of those, served from the cache
+    int64_t n_uploads; // experts copied into the cache
+    size_t  n_bytes;   // device memory of the cache
+    int32_t n_layers;  // layers with a cache
+};
+
+// returns false if the context has no expert cache
+LLAMA_API bool llama_expert_cache_get_info(const struct llama_context * ctx, struct llama_expert_cache_info * info);
