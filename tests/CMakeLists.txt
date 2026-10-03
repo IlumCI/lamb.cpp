@@ -301,6 +301,7 @@ if (NOT GGML_BACKEND_DL)
     # uses the CPU backend directly
     llama_build_and_test(test-sched-prefetch.cpp mock-gpu-backend.cpp)
     llama_build_and_test(test-sched-concurrent.cpp mock-gpu-backend.cpp)
+    llama_build_and_test(test-amx-moe.cpp)
 endif()
 llama_build_and_test(test-model-resolution.cpp)
 # the test serves its repos from an httplib server, and the library links it privately

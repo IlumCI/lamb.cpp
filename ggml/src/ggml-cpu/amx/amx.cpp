@@ -22,13 +22,17 @@
 namespace ggml::cpu::amx {
 class tensor_traits : public ggml::cpu::tensor_traits {
     bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
-        size = ggml_backend_amx_desired_wsize(op);
+        size = op->op == GGML_OP_MUL_MAT_ID ? ggml_backend_amx_desired_wsize_id(op) : ggml_backend_amx_desired_wsize(op);
         return true;
     }
 
     bool compute_forward(struct ggml_compute_params * params, struct ggml_tensor * op) override {
         if (op->op == GGML_OP_MUL_MAT) {
             ggml_backend_amx_mul_mat(params, op);
+            return true;
+        }
+        if (op->op == GGML_OP_MUL_MAT_ID) {
+            ggml_backend_amx_mul_mat_id(params, op);
             return true;
         }
         return false;
@@ -143,6 +147,28 @@ static size_t ggml_backend_amx_buffer_type_get_alignment(ggml_backend_buffer_typ
 namespace ggml::cpu::amx {
 class extra_buffer_type : ggml::cpu::extra_buffer_type {
     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
+        if (op->op == GGML_OP_MUL_MAT_ID) {
+            // MoE experts: quantized types with AMX kernels only, f16 has no MUL_MAT_ID path here
+            // q6_K is left out: measured slower than the plain CPU kernels for 32 and 512 tokens (tests/test-amx-moe.cpp --perf)
+            const struct ggml_tensor * as  = op->src[0];
+            const struct ggml_tensor * b   = op->src[1];
+            const struct ggml_tensor * ids = op->src[2];
+            if (!as->buffer || as->buffer->buft != ggml_backend_amx_buffer_type() || !qtype_has_amx_kernels(as->type) ||
+                as->type == GGML_TYPE_Q6_K) {
+                return false;
+            }
+            if (!ggml_is_contiguous(as) || as->ne[3] != 1 || b->type != GGML_TYPE_F32 || ids->type != GGML_TYPE_I32) {
+                return false;
+            }
+            if (b->buffer && !ggml_backend_buft_is_host(b->buffer->buft)) {
+                return false;
+            }
+            if (b->nb[0] != sizeof(float) || b->ne[3] != 1 || op->ne[0] % (TILE_N * 2) || op->nb[0] != sizeof(float)) {
+                return false;
+            }
+            const int64_t align = (as->type == GGML_TYPE_Q4_0 || as->type == GGML_TYPE_Q4_1 || as->type == GGML_TYPE_Q8_0) ? TILE_K : 256;
+            return as->ne[0] % align == 0;
+        }
         if (op->op != GGML_OP_MUL_MAT) {
             return false;
         }
@@ -190,7 +216,7 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
     }
 
     ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
-        if (op->op == GGML_OP_MUL_MAT && op->src[0]->buffer &&
+        if ((op->op == GGML_OP_MUL_MAT || op->op == GGML_OP_MUL_MAT_ID) && op->src[0]->buffer &&
             op->src[0]->buffer->buft == ggml_backend_amx_buffer_type()) {
             return (ggml::cpu::tensor_traits *) op->src[0]->extra;
         }
