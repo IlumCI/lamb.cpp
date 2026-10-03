@@ -1253,8 +1253,18 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
     }
 
+    if (params.offload_cost) {
+        common_hw_profile prof;
+        if (common_hw_profile_resolve(params.hw_profile, params.cpuparams.n_threads, prof)) {
+            const int n = common_hw_profile_apply_offload(prof);
+            COM_INF("%s: cost based op offload enabled on %d device(s)\n", __func__, n);
+        } else {
+            COM_WRN("%s: no hardware profile, keeping the fixed op offload rule\n", __func__);
+        }
+    }
+
     if (params.fit_estimate) {
-        hp_log_estimate(params.model.path.c_str(), mparams, cparams, params.hw_profile, params.cpuparams.n_threads);
+        hp_log_estimate(params.model.path.c_str(), mparams, cparams, params.hw_profile, params.cpuparams.n_threads, params.offload_cost);
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);

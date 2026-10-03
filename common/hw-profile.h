@@ -74,3 +74,12 @@ bool common_hw_profile_load(const std::string & path, common_hw_profile & out);
 
 // load the cached profile for this machine if the key matches, else measure and save it
 bool common_hw_profile_get(const common_hw_profile_params & params, bool refresh, common_hw_profile & out);
+
+// load profile_path, or the cached profile of this machine if empty (measured once if missing)
+bool common_hw_profile_resolve(const std::string & profile_path, int32_t n_threads, common_hw_profile & out);
+
+// offload params of a GPU from the profile, returns false if the profile lacks the device or the CPU
+bool common_hw_profile_offload_params(const common_hw_profile & prof, const std::string & dev_name, ggml_backend_offload_params & out);
+
+// set the offload params of every registered GPU that the profile has, returns the number of devices set
+int common_hw_profile_apply_offload(const common_hw_profile & prof);

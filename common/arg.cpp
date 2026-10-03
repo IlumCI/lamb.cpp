@@ -2932,6 +2932,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_FIT_ESTIMATE_TPS"));
     add_opt(common_arg(
+        { "--offload-policy" }, "{fixed,cost}",
+        string_format("how to decide whether a matmul with weights in system memory runs on the GPU (default: '%s')\n"
+            "- fixed: when the batch has at least GGML_OP_OFFLOAD_MIN_BATCH (32) tokens\n"
+            "- cost: when copying the weights it reads and running there is faster, from the hardware profile",
+            params.offload_cost ? "cost" : "fixed"),
+        [](common_params & params, const std::string & value) {
+            if (value == "fixed") {
+                params.offload_cost = false;
+            } else if (value == "cost") {
+                params.offload_cost = true;
+            } else {
+                throw std::invalid_argument("invalid value for --offload-policy: " + value);
+            }
+        }
+    ).set_env("LLAMA_ARG_OFFLOAD_POLICY"));
+    add_opt(common_arg(
         { "--hw-profile" }, "PATH",
         "hardware profile from llama-hw-profile for --fit-estimate (default: cached profile of this machine, measured once if missing)",
         [](common_params & params, const std::string & value) {

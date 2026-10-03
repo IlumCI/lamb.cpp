@@ -44,6 +44,7 @@ struct hp_cost_params {
     double  t_switch_s           = 20e-6; // cost of each change of device during a forward pass
     bool    op_offload           = true;  // large batches copy host weights to the GPU, as ggml-backend does
     int32_t op_offload_min_batch = 32;    // GGML_OP_OFFLOAD_MIN_BATCH
+    bool    offload_cost         = false; // decide the offload per op by cost, as --offload-policy cost does
 };
 
 struct hp_estimate {
@@ -75,4 +76,4 @@ std::string hp_estimate_to_string(const hp_model & model, const hp_estimate & es
 // estimate the placement given by mparams/cparams and log it
 //   - profile_path: profile JSON to use, empty to use the cached profile of this machine (measured once if missing)
 bool hp_log_estimate(const char * path_model, const llama_model_params & mparams, const llama_context_params & cparams,
-        const std::string & profile_path, int32_t n_threads);
+        const std::string & profile_path, int32_t n_threads, bool offload_cost);

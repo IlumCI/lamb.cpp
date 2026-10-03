@@ -141,6 +141,10 @@ hp_estimate hp_estimate_cost(const hp_model & model, const common_hw_profile & p
 
     const bool offload = params.op_offload && offload_dev != nullptr && params.n_ubatch >= params.op_offload_min_batch;
 
+    ggml_backend_offload_params op = {};
+    const bool use_cost = params.op_offload && params.offload_cost && offload_dev != nullptr &&
+        common_hw_profile_offload_params(prof, offload_dev->name, op);
+
     int32_t prev_dev = INT32_MIN;
     for (const hp_tensor & t : model.tensors) {
         const size_t slot = t.dev < 0 ? nd : (size_t) t.dev;
@@ -177,9 +181,16 @@ hp_estimate hp_estimate_cost(const hp_model & model, const common_hw_profile & p
         }
         const double flops = 2.0*t.n_params*B*(t.use == HP_USE_EXPERT ? f_expert : 1.0);
         const double touch = t.bytes*(t.use == HP_USE_EXPERT ? f_expert_pp : 1.0);
-        if (t.dev < 0 && offload) {
+        double t_host = 0.0;
+        double t_dev  = 0.0;
+        if (t.dev < 0 && use_cost && t.bytes > 0 && ggml_backend_offload_cost(&op, t.type, t.bytes, touch/t.bytes, flops, &t_host, &t_dev)) {
+            est.pp_s += std::min(t_host, t_dev);
+        } else if (t.dev < 0 && offload) {
             const double tflops = offload_dev->gemm_tflops_for(t.type)*1e12;
-            est.pp_s += touch/(offload_dev->h2d_gbps*1e9) + (tflops > 0.0 ? flops/tflops : 0.0);
+            const double gemv   = offload_dev->gemv_gbps_for(t.type)*1e9;
+            const double t_mm   = tflops > 0.0 ? flops/tflops : 0.0;
+            const double t_rd   = gemv   > 0.0 ? touch/gemv   : 0.0;
+            est.pp_s += touch/(offload_dev->h2d_gbps*1e9) + std::max(t_mm, t_rd);
         } else {
             const double tflops = dp->gemm_tflops_for(t.type)*1e12;
             const double t_mm   = tflops > 0.0 ? flops/tflops : 0.0;
@@ -233,20 +244,11 @@ std::string hp_estimate_to_string(const hp_model & model, const hp_estimate & es
 }
 
 bool hp_log_estimate(const char * path_model, const llama_model_params & mparams, const llama_context_params & cparams,
-        const std::string & profile_path, int32_t n_threads) {
+        const std::string & profile_path, int32_t n_threads, bool offload_cost) {
     common_hw_profile prof;
-    if (!profile_path.empty()) {
-        if (!common_hw_profile_load(profile_path, prof)) {
-            LOG_ERR("%s: failed to load hardware profile %s\n", __func__, profile_path.c_str());
-            return false;
-        }
-    } else {
-        common_hw_profile_params hp;
-        hp.n_threads = n_threads;
-        if (!common_hw_profile_get(hp, false, prof)) {
-            LOG_ERR("%s: failed to get a hardware profile\n", __func__);
-            return false;
-        }
+    if (!common_hw_profile_resolve(profile_path, n_threads, prof)) {
+        LOG_ERR("%s: failed to get a hardware profile\n", __func__);
+        return false;
     }
 
     hp_model model;
@@ -258,6 +260,7 @@ bool hp_log_estimate(const char * path_model, const llama_model_params & mparams
     hp_cost_params cp;
     cp.n_ubatch = cparams.n_ubatch;
     cp.op_offload = cparams.op_offload;
+    cp.offload_cost = offload_cost;
     if (const char * env = getenv("GGML_OP_OFFLOAD_MIN_BATCH")) {
         cp.op_offload_min_batch = atoi(env);
     }

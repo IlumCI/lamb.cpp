@@ -70,7 +70,7 @@ int llama_fit_params(int argc, char ** argv) {
         printf("%s\n", any_tbo ? "\"" : "");
 
         if (params.fit_estimate) {
-            hp_log_estimate(params.model.path.c_str(), mparams, cparams, params.hw_profile, params.cpuparams.n_threads);
+            hp_log_estimate(params.model.path.c_str(), mparams, cparams, params.hw_profile, params.cpuparams.n_threads, params.offload_cost);
         }
     } else {
         LOG_INF("%s: printing estimated memory in MiB to stdout (device, model, context, compute) ...\n", __func__);
