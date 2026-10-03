@@ -124,10 +124,22 @@ Not done: picking the CPU path on purpose for small adapters (rank <= 16) when t
 
 `tests/test-lora-cache.cpp` writes three random rank-4 adapters for a generated test model, loads them into a plain model and into one with a cache that fits two (in host memory, `LLAMA_LORA_CACHE_HOST=1`), and switches between them 8 times, half of the time while the upload is still in flight. The logits must be bit-identical to the plain model each time and differ from no adapter, the cache must upload and evict and stay within its budget. Leaving the B matrix of the device copy unfilled makes all 8 steps fail.
 
+## Concurrent host and device work (`GGML_SCHED_CONCURRENT=1`)
+
+The scheduler runs splits in graph order. A host split is computed on the calling thread, so while the CPU computes routed experts the GPU waits, even for work that does not need the host result. In a MoE layer that work exists: the shared expert, and with `--expert-cache` the cached experts.
+
+With `GGML_SCHED_CONCURRENT=1`, before a host split runs the scheduler looks at the next device split, finds its leading nodes that read nothing the host split makes, copies the inputs they need and starts them on the device. The host split then runs while the device works, and the rest of the device split (the node that joins both results) runs afterwards as usual. KTransformers (SOSP'25) gets its CPU/GPU overlap the same way, without deferring experts to the next layer, so the output does not change.
+
+It needs the device part to come after the host part in the graph: `build_moe_ffn` builds the host experts before the cached ones for this reason. The memory plan of ggml-alloc stays valid: the host split's inputs are copied before the device starts, and every device tensor the early nodes use was planned to be live at that point anyway.
+
+Not done: weight inputs (the expert-wise copy of `MUL_MAT_ID` weights keeps its order), pipeline parallelism (`n_copies > 1`), and graphs with an eval callback. In the model code the shared expert is built after the routed experts and joined with them by an add, so it should form the leading nodes of the device split after the host experts and overlap with them; this is not verified on a real model here, `GGML_SCHED_DEBUG=2` prints the splits to check it.
+
+`tests/test-sched-concurrent.cpp` builds the MoE shape (device, slow host op, independent device work, join) on the mock GPU with a device time per node: without the flag the device never runs during the host op, with it the device does, the run takes 304 ms instead of 424 ms (the predicted 100 ms instead of 140 ms per run), and the results are bit-identical to a CPU-only run. Making the dependency check ignore host results lets the join run early and the results differ.
+
 ## Tests
 
 ```sh
-ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache|test-lora-cache" --output-on-failure
+ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache|test-lora-cache|test-sched-concurrent" --output-on-failure
 ```
 
 `test-hybrid-plan` also loads every generated test model (`test-generate-models`) with `no_alloc` and checks the collected placement.
@@ -142,6 +154,6 @@ ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|
 | M3 weight prefetch on a second stream | done, verified on a mock async GPU, not yet measured on CUDA |
 | M4 MoE expert cache, CPU compute on miss | done, bit-exact on 52 MoE architectures on the CPU, gain not yet measured on a GPU |
 | M7 LoRA cache, CPU path until the copy is done | done, bit-exact on the CPU, not yet measured on a GPU |
-| M5 concurrent CPU/GPU splits | planned |
+| M5 concurrent host and device splits | done, verified on a mock async GPU, not yet measured on CUDA |
 
 To check the model on a GPU machine, compare `--fit-estimate` with `llama-bench -m model.gguf -fa 1 -p 512 -n 128` for the same placement.

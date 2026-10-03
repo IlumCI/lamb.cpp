@@ -26,3 +26,9 @@ void               mock_gpu_dev_free(ggml_backend_dev_t dev);
 
 mock_gpu_stats mock_gpu_get_stats(ggml_backend_dev_t dev);
 void           mock_gpu_reset_stats(ggml_backend_dev_t dev);
+
+// sleep this long per node of each graph compute, to stand for device work
+void mock_gpu_set_compute_delay(ggml_backend_dev_t dev, int64_t us);
+
+// number of graphs running on the device right now
+int mock_gpu_running_graphs(ggml_backend_dev_t dev);
