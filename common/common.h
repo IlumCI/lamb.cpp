@@ -484,6 +484,7 @@ struct common_params {
     std::string hw_profile;              // hardware profile JSON for the estimate and the offload policy, empty: cached profile of this machine
     bool    offload_cost       = false; // decide the offload of large-batch ops with host weights by cost instead of a fixed batch size
     int32_t n_expert_cache     = 0;     // routed experts per MoE layer to cache in device memory (0 = off)
+    int32_t lora_cache_mib     = 0;     // keep LoRA adapters in system memory and cache the ones in use in this much device memory (0 = off)
 
     // margin per device in bytes for fitting parameters to free memory:
     std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);

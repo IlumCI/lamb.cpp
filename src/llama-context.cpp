@@ -498,6 +498,10 @@ llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
 
+    if (model.lora_cache) {
+        model.lora_cache->use(this, {});
+    }
+
     if (ecache && ecache->stats().n_lookups > 0) {
         const auto & st = ecache->stats();
         LLAMA_LOG_INFO("%s: expert cache: %.1f%% of %lld expert uses were hits, %lld experts uploaded\n", __func__,
@@ -1371,7 +1375,31 @@ void llama_context::set_adapters_lora(llama_adapter_lora ** adapters, size_t n_a
         }
     }
 
+    if (model.lora_cache) {
+        // the cache may evict an adapter this context drops, so its last graph must be done
+        synchronize();
+        std::vector<llama_adapter_lora *> used;
+        for (const auto & [adapter, scale] : *loras) {
+            used.push_back(adapter);
+        }
+        model.lora_cache->use(this, used);
+        lora_cache_gen = model.lora_cache->poll();
+    }
+
     sched_need_reserve = true;
+}
+
+void llama_context::lora_cache_poll() {
+    if (!model.lora_cache) {
+        return;
+    }
+    const uint64_t gen = model.lora_cache->poll();
+    if (gen != lora_cache_gen) {
+        // an adapter moved between system and device memory: rebuild the graph with the new tensors
+        lora_cache_gen = gen;
+        loras.reset(new llama_adapter_loras(*loras));
+        sched_need_reserve = true;
+    }
 }
 
 bool llama_context::adapters_lora_are_same(llama_adapter_lora ** adapters, size_t n_adapters, float * scales) {
@@ -1545,6 +1573,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
         t_compute_start_us = ggml_time_us();
     }
 
+    lora_cache_poll();
     sched_reserve();
 
     n_queued_tokens += n_tokens;
@@ -1833,6 +1862,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     output_swaps.clear();
     embd_batch_idxs.clear();
 
+    lora_cache_poll();
     sched_reserve();
 
     bool did_optimize = false;

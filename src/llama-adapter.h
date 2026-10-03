@@ -4,6 +4,7 @@
 
 #include "ggml-cpp.h"
 
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -46,8 +47,12 @@ using llama_adapter_cvec_ptr = std::shared_ptr<llama_adapter_cvec>;
 //
 
 struct llama_adapter_lora_weight {
-    ggml_tensor * a = nullptr;
+    ggml_tensor * a = nullptr; // the tensors the graph reads: the home copy, or the device copy of the lora cache
     ggml_tensor * b = nullptr;
+
+    // home copy in system memory when the lora cache manages this weight, else nullptr
+    ggml_tensor * a_host = nullptr;
+    ggml_tensor * b_host = nullptr;
 
     // get actual scale based on rank and alpha
     float get_scale(float alpha, float adapter_scale) const {
@@ -76,6 +81,9 @@ struct llama_adapter_lora {
 
     // activated lora (aLoRA)
     std::vector<llama_token> alora_invocation_tokens;
+
+    // [lora cache] weights kept in system memory, by the device buffer type their copy goes to while in use
+    std::map<ggml_backend_buffer_type_t, std::vector<std::string>> tiered;
 
     explicit llama_adapter_lora(llama_model * model) : model(model) {}
     ~llama_adapter_lora() = default;

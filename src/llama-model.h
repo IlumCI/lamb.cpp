@@ -6,6 +6,7 @@
 #include "llama-hparams.h"
 #include "llama-memory.h"
 #include "llama-vocab.h"
+#include "llama-lora-cache.h"
 
 #include <map>
 #include <memory>
@@ -739,6 +740,9 @@ struct llama_model {
 
     // for keeping track of associated LoRA adapters
     std::unordered_set<llama_adapter_lora *> loras;
+
+    // device-memory cache of LoRA adapters kept in system memory [--lora-cache], set before loading adapters
+    std::unique_ptr<llama_lora_cache> lora_cache;
 
     // which tensors can be prefetched - driven by TENSOR_READ_LAZY
     std::unordered_set<const ggml_tensor *> can_prefetch;

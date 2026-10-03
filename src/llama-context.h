@@ -252,6 +252,9 @@ public:
     // nullptr if the context has no expert cache
     const llama_expert_cache * get_expert_cache() const { return ecache.get(); }
 
+    // follow adapters that the lora cache moved between system and device memory
+    void lora_cache_poll();
+
     // can reuse the llm_graph_result instance of the context (for example to update a memory module)
     llm_graph_result * get_gf_res_reserve() const;
 
@@ -298,6 +301,9 @@ private:
 
     // routed experts cached in device memory [n_expert_cache]
     std::unique_ptr<llama_expert_cache> ecache;
+
+    // generation of the model lora cache that the current graphs were built for
+    uint64_t lora_cache_gen = 0;
     llama_adapter_loras_ptr loras;
 
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
