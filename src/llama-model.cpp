@@ -3365,6 +3365,21 @@ int32_t llama_model_n_expert(const struct llama_model * model) {
     return model->hparams.n_expert;
 }
 
+int32_t llama_model_n_expert_used(const struct llama_model * model) {
+    return model->hparams.n_expert_used();
+}
+
+int32_t llama_model_n_tensors(const struct llama_model * model) {
+    return (int32_t) model->tensors_by_name.size();
+}
+
+const ggml_tensor * llama_model_tensor_get(const struct llama_model * model, int32_t i) {
+    if (i < 0 || (size_t) i >= model->tensors_by_name.size()) {
+        return nullptr;
+    }
+    return model->tensors_by_name[i].second;
+}
+
 int32_t llama_model_n_devices(const struct llama_model * model) {
     return (int32_t)model->devices.size();
 }

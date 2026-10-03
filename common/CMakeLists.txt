@@ -80,6 +80,8 @@ add_library(${TARGET}
     fit.h
     hw-profile.cpp
     hw-profile.h
+    hybrid-plan.cpp
+    hybrid-plan.h
     hf-cache.cpp
     hf-cache.h
     http.h

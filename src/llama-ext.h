@@ -86,6 +86,14 @@ using llama_memory_breakdown = std::map<ggml_backend_buffer_type_t, llama_memory
 LLAMA_API int32_t llama_model_n_expert (const struct llama_model * model);
 LLAMA_API int32_t llama_model_n_devices(const struct llama_model * model);
 
+// number of experts used per token, 0 for dense models
+LLAMA_API int32_t llama_model_n_expert_used(const struct llama_model * model);
+
+// weight tensors of the model, the buffer of each tensor tells where it was placed
+// with no_alloc the buffer is a dummy of the right buffer type, so placement can be read without loading
+LLAMA_API int32_t                   llama_model_n_tensors  (const struct llama_model * model);
+LLAMA_API const struct ggml_tensor * llama_model_tensor_get(const struct llama_model * model, int32_t i);
+
 LLAMA_API ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int i);
 
 LLAMA_API llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx);
