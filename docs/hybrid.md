@@ -104,10 +104,30 @@ llama-server -m moe.gguf -ncmoe 99 --expert-cache 32
 
 `tests/test-expert-cache.cpp` runs every generated MoE test model with and without a cache placed in host memory (`LLAMA_EXPERT_CACHE_HOST=1`) and updated after every ubatch, and requires bit-identical logits over a prompt and 32 decoded tokens: 55 models, 52 of them route through the cache. Uploading the wrong expert into a slot makes all 52 fail.
 
+## LoRA cache (`--lora-cache MiB`)
+
+Upstream loads every LoRA adapter into the memory of the device that holds the weight it changes, so N adapters on GPU layers cost N times their size in VRAM, whether or not a request uses them. `--lora-cache MiB` (S-LoRA 2311.03285) changes where adapters live:
+
+- adapters loaded after the flag keep a home copy in system memory: the pinned host buffer of the GPU when it has one, else plain system memory
+- a model-level cache copies the adapters that a context applies (`llama_set_adapters_lora`, the server's per-request `lora` field) to the GPU on a worker thread, within the budget per GPU
+- until the copy is done the graph reads the home copy, so that adapter's matmuls run on the CPU (or are offloaded by the scheduler for large batches) instead of making the request wait
+- when a copy is done, the next decode of every context sees a new generation of the cache and rebuilds its graph with the device copy
+- an adapter that no context applies is evicted first, least recently used; an adapter that a context applies is never evicted, and an adapter that does not fit stays on the CPU path
+
+A context synchronizes before it changes its adapters, so a copy is never freed while one of its graphs runs. Contexts that share a model across threads must not change adapters while another thread builds a graph: the cache swaps the tensor pointers of the shared adapter.
+
+```sh
+llama-server -m model.gguf -ngl 99 --lora-cache 512 --lora a.gguf --lora b.gguf --lora c.gguf ...
+```
+
+Not done: picking the CPU path on purpose for small adapters (rank <= 16) when the matmul there is cheaper than the copy, and a shared-basis format (VeRA 2310.11454) that would make each adapter a few KiB.
+
+`tests/test-lora-cache.cpp` writes three random rank-4 adapters for a generated test model, loads them into a plain model and into one with a cache that fits two (in host memory, `LLAMA_LORA_CACHE_HOST=1`), and switches between them 8 times, half of the time while the upload is still in flight. The logits must be bit-identical to the plain model each time and differ from no adapter, the cache must upload and evict and stay within its budget. Leaving the B matrix of the device copy unfilled makes all 8 steps fail.
+
 ## Tests
 
 ```sh
-ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache" --output-on-failure
+ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|test-sched-prefetch|test-expert-cache|test-lora-cache" --output-on-failure
 ```
 
 `test-hybrid-plan` also loads every generated test model (`test-generate-models`) with `no_alloc` and checks the collected placement.
@@ -121,7 +141,7 @@ ctest --test-dir build -R "test-hw-profile|test-hybrid-plan|test-offload-policy|
 | M2 cost based op offload | done, CPU verified, gain not yet measured on a GPU |
 | M3 weight prefetch on a second stream | done, verified on a mock async GPU, not yet measured on CUDA |
 | M4 MoE expert cache, CPU compute on miss | done, bit-exact on 52 MoE architectures on the CPU, gain not yet measured on a GPU |
-| M7 tiered LoRA cache | planned |
+| M7 LoRA cache, CPU path until the copy is done | done, bit-exact on the CPU, not yet measured on a GPU |
 | M5 concurrent CPU/GPU splits | planned |
 
 To check the model on a GPU machine, compare `--fit-estimate` with `llama-bench -m model.gguf -fa 1 -p 512 -n 128` for the same placement.

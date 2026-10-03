@@ -1287,6 +1287,8 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
 }
 
 llama_model::~llama_model() {
+    // the cache worker may still read adapter memory
+    lora_cache.reset();
     for (auto * lora : loras) {
         delete lora;
     }
@@ -3514,4 +3516,27 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
     }
 
     return (uint32_t) nelements;
+}
+
+void llama_model_set_lora_cache(llama_model * model, size_t budget) {
+    if (budget == 0) {
+        model->lora_cache.reset();
+        return;
+    }
+    // LLAMA_LORA_CACHE_HOST lets a CPU-only build exercise the cache, for tests
+    const char * host = getenv("LLAMA_LORA_CACHE_HOST");
+    model->lora_cache = std::make_unique<llama_lora_cache>(budget, host && atoi(host) != 0);
+}
+
+bool llama_model_get_lora_cache_info(const llama_model * model, llama_lora_cache_info * info) {
+    if (!model->lora_cache) {
+        return false;
+    }
+    const llama_lora_cache::info i = model->lora_cache->get_info();
+    info->n_uploads   = i.n_uploads;
+    info->n_evictions = i.n_evictions;
+    info->n_failed    = i.n_failed;
+    info->n_bytes     = i.n_bytes;
+    info->n_resident  = i.n_resident;
+    return true;
 }

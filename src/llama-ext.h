@@ -169,3 +169,22 @@ struct llama_expert_cache_info {
 
 // returns false if the context has no expert cache
 LLAMA_API bool llama_expert_cache_get_info(const struct llama_context * ctx, struct llama_expert_cache_info * info);
+
+//
+// lora cache [--lora-cache]
+//
+
+// keep LoRA adapters loaded from now on in system memory, and copy the ones in use to device memory within budget bytes per device
+// must be called before the adapters are loaded; 0 turns it off for adapters loaded later
+LLAMA_API void llama_model_set_lora_cache(struct llama_model * model, size_t budget);
+
+struct llama_lora_cache_info {
+    int64_t n_uploads;   // uploads finished
+    int64_t n_evictions;
+    int64_t n_failed;    // uploads that could not allocate
+    size_t  n_bytes;     // bytes in device memory, including uploads in flight
+    int32_t n_resident;  // adapter copies in device memory
+};
+
+// returns false if the model has no lora cache
+LLAMA_API bool llama_model_get_lora_cache_info(const struct llama_model * model, struct llama_lora_cache_info * info);

@@ -12,6 +12,7 @@ set(LLAMA_CORE_SOURCES
     llama.cpp
     llama-adapter.cpp
     llama-expert-cache.cpp
+    llama-lora-cache.cpp
     llama-arch.cpp
     llama-batch.cpp
     llama-chat.cpp

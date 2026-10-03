@@ -352,6 +352,22 @@ static void llama_adapter_lora_init_impl(llama_model & model, FILE * file, llama
             }
         }
 
+        // [lora cache] keep the weight in system memory, the cache copies it to its device while it is in use
+        ggml_backend_buffer_type_t dev_buft = nullptr;
+        if (model.lora_cache && !is_token_embd && (!ggml_backend_buft_is_host(buft) || model.lora_cache->allow_host())) {
+            dev_buft = buft;
+            ggml_backend_dev_t         dev  = ggml_backend_buft_get_device(buft);
+            ggml_backend_buffer_type_t home = dev ? ggml_backend_dev_host_buffer_type(dev) : nullptr;
+            if (home == nullptr) {
+                auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+                if (!cpu_dev) {
+                    throw std::runtime_error(format("%s: no CPU backend found", __func__));
+                }
+                home = ggml_backend_dev_buffer_type(cpu_dev);
+            }
+            buft = home;
+        }
+
         LLAMA_LOG_DEBUG("%s: lora for '%s' -> '%s'\n", __func__, model_tensor->name, ggml_backend_buft_name(buft));
 
         ggml_context * dev_ctx = ctx_for_buft(buft);
@@ -376,6 +392,11 @@ static void llama_adapter_lora_init_impl(llama_model & model, FILE * file, llama
         ggml_set_name(tensor_a, w.a->name);
         ggml_set_name(tensor_b, w.b->name);
         adapter.ab_map[name] = llama_adapter_lora_weight(tensor_a, tensor_b);
+        if (dev_buft) {
+            adapter.ab_map[name].a_host = tensor_a;
+            adapter.ab_map[name].b_host = tensor_b;
+            adapter.tiered[dev_buft].push_back(name);
+        }
     }
 
     // allocate tensors / buffers and zero
@@ -502,6 +523,9 @@ void llama_adapter_lora_free(llama_adapter_lora * adapter) {
     }
 
     if (adapter->model != nullptr) {
+        if (adapter->model->lora_cache) {
+            adapter->model->lora_cache->forget(adapter);
+        }
         adapter->model->loras.erase(adapter);
         adapter->model = nullptr;
     }

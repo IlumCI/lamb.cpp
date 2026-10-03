@@ -2956,6 +2956,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_EXPERT_CACHE"));
     add_opt(common_arg(
+        { "--lora-cache" }, "MiB",
+        string_format("keep LoRA adapters in system memory and copy the ones in use to the memory of their GPU, within this budget per GPU;\n"
+            "until a copy is done the adapter runs on the CPU (default: %d, 0 = off: every adapter stays in the memory of its GPU)", params.lora_cache_mib),
+        [](common_params & params, int value) {
+            params.lora_cache_mib = value;
+        }
+    ).set_env("LLAMA_ARG_LORA_CACHE"));
+    add_opt(common_arg(
         { "--hw-profile" }, "PATH",
         "hardware profile from llama-hw-profile for --fit-estimate (default: cached profile of this machine, measured once if missing)",
         [](common_params & params, const std::string & value) {

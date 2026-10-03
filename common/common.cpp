@@ -1295,6 +1295,10 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         LOG_INF("%s", "decision model reads the embeddings output, enabling embedding mode\n");
     }
 
+    if (params.lora_cache_mib > 0) {
+        llama_model_set_lora_cache(model, (size_t) params.lora_cache_mib*1024*1024);
+    }
+
     // load and optionally apply lora adapters
     for (auto & la : params.lora_adapters) {
         llama_adapter_lora_ptr lora;

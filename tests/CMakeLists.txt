@@ -241,6 +241,14 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     )
     set_tests_properties(test-expert-cache PROPERTIES FIXTURES_REQUIRED generate-models)
 
+    # Test the LoRA cache: bit-identical logits from the home and the cached copy, uploads and evictions within the budget
+    llama_build(test-lora-cache.cpp)
+    llama_test(
+        test-lora-cache
+        LABEL main
+        ARGS --models "${MODEL_DIR}"
+    )
+    set_tests_properties(test-lora-cache PROPERTIES FIXTURES_REQUIRED generate-models)
 
     llama_build(test-fusion.cpp)
 endif()
